@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sync"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -12,7 +13,7 @@ import (
 )
 
 // Воркер
-func worker(id int, jobs <-chan string, wg *sync.WaitGroup) {
+func worker(id int, jobs <-chan string) {
 	// Ожидаем получения данных для работы
 	// Если данных нет в канале - блокировка
 	for j := range jobs {
@@ -20,7 +21,6 @@ func worker(id int, jobs <-chan string, wg *sync.WaitGroup) {
 		// Создаем миниатюру, сохраняем данные в бд и прочее
 		time.Sleep(time.Second * 1)
 		fmt.Println("worker", id, "создал миниатюру по пути: ", j)
-		wg.Done()
 	}
 }
 
@@ -29,12 +29,10 @@ func main() {
 	// Каналы для воркера
 	jobs := make(chan string, 100)
 
-	var wg sync.WaitGroup
-
 	// Сразу запускаем воркеров в горутинах
 	// Они будут ожидать получения данных для работы
-	for w := 1; w <= 2; w++ {
-		go worker(w, jobs, &wg)
+	for w := 1; w <= 3; w++ {
+		go worker(w, jobs)
 	}
 
 	// Адрес сервера nats
@@ -65,7 +63,6 @@ func main() {
 
 	// Смотрим что сейчас в потоке
 	//fmt.Println("Начальное состояние потока:")
-
 	//printStreamState(ctx, stream)
 
 	// Отправляем данные
@@ -74,9 +71,9 @@ func main() {
 	js.Publish(ctx, "events.us.page_loaded", []byte("images/picture-001"))
 	js.Publish(ctx, "events.eu.mouse_clicked", []byte("images/picture-002"))
 	js.Publish(ctx, "events.us.input_focused", []byte("images/picture-003"))
-	js.Publish(ctx, "events.us.page_loaded", []byte("images/picture-004"))
-	js.Publish(ctx, "events.eu.mouse_clicked", []byte("images/picture-005"))
-	js.Publish(ctx, "events.us.input_focused", []byte("images/picture-006"))
+	js.Publish(ctx, "events.us.page_loaded-2", []byte("images/picture-004"))
+	js.Publish(ctx, "events.eu.mouse_clicked-2", []byte("images/picture-005"))
+	js.Publish(ctx, "events.us.input_focused-2", []byte("images/picture-006"))
 
 	//fmt.Println("Поток до чтения данных получателем:")
 	//printStreamState(ctx, stream)
@@ -86,101 +83,28 @@ func main() {
 		Name: "processor-1",
 	})
 
-	// Костыль
-	wg.Add(1)
-
-	// Нужно запустить получателя в бесконечном цикле для чтения входящих сообшений
+	// В горутине получатель беспрерывно ждет входящих сообщений
+	// При получении сообщений, передает пути к изображениям (задачи) воркерам
 	go func() {
-		// Бесконечный цикл на получение сообщений
-		for {
-			// После таймаута Next обрывает соединение с сервером nats
-			msg, err := cons.Next()
-			if err != nil {
-				fmt.Println(err)
-			}
-			msg.DoubleAck(ctx)
+		cons.Consume(func(msg jetstream.Msg) {
+			// Печатаем полученные данные
+			fmt.Println("Получатель получил сообщение - ", string(msg.Data()))
 			// Заполняем канал данными
 			// Воркеры начнут работать
 			jobs <- string(msg.Data())
-			wg.Add(1)
-			// Печатаем полученные данные
-			fmt.Println("Получатель получил сообщение - ", string(msg.Data()))
-		}
+			// Подтверждаем получение сообщения
+			msg.DoubleAck(ctx)
+			//msg.Ack()
+		})
 	}()
 
-	// Это работает, но это НЕ бесконечный цикл
-	// // Получатель читает определеное количество сообщений
-	// msgs, _ := cons.Fetch(6)
-	// for msg := range msgs.Messages() {
-	// 	msg.DoubleAck(ctx)
-	// 	// Заполняем канал данными
-	// 	// Воркеры начнут работать
-	// 	jobs <- string(msg.Data())
-	// 	wg.Add(1)
-	// 	// Печатаем полученные данные
-	// 	fmt.Println("Получатель получил сообщение - ", string(msg.Data()))
-	// }
+	// Завершение программы по Ctrl+C
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, syscall.SIGINT)
+	<-shutdown
 
 	//fmt.Println("Поток после чтения данных получателем:")
 	//printStreamState(ctx, stream)
-
-	// Ждем завершения работы воркерами
-	wg.Wait()
-
-	//r
-	//r
-	//коммент все что ниже для теста воркер пула
-	// fmt.Println("Удалили получателя")
-	// // Удаляем получателя
-	// stream.DeleteConsumer(ctx, "processor-1")
-
-	// fmt.Println("Создаем 2 новых получателей")
-	// // Новые получатели
-	// cons1, _ := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-	// 	Name:          "processor-us",
-	// 	FilterSubject: "events.us.>",
-	// })
-	// cons2, _ := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-	// 	Name:          "processor-eu",
-	// 	FilterSubject: "events.eu.>",
-	// })
-
-	// fmt.Println("Отправили еще 4 новых сообщения")
-	// // Публикуем данные
-	// js.Publish(ctx, "events.eu.mouse_clicked", []byte("новая информация 1"))
-	// js.Publish(ctx, "events.us.page_loaded", []byte("новая информация 2"))
-	// js.Publish(ctx, "events.us.input_focused", []byte("новая информация 3"))
-	// js.Publish(ctx, "events.eu.page_loaded", []byte("новая информация 4"))
-
-	// fmt.Println("Состояние потока:")
-	// printStreamState(ctx, stream)
-
-	// // Первый получатель читает только 2 собщения
-	// msgs, _ = cons1.Fetch(2)
-	// for msg := range msgs.Messages() {
-	// 	fmt.Printf("us Первый получил: %s\n", msg.Subject())
-	// 	fmt.Println(string(msg.Data()))
-	// 	//msg.Ack()
-	// 	// Сообщаем серверу о прочтении данного сообщения
-	// 	msg.DoubleAck(ctx)
-	// }
-
-	// // Для непрерывного получения сообщений
-	// //cons1.Consume()
-	// // Читает сообщение за сообщением
-	// //cons1.Next()
-
-	// // Второй получатель читает только 2 собщения
-	// msgs, _ = cons2.Fetch(2)
-	// for msg := range msgs.Messages() {
-	// 	fmt.Printf("eu Второй получил: %s\n", msg.Subject())
-	// 	fmt.Println(string(msg.Data()))
-	// 	//msg.Ack()
-	// 	// Сообщаем серверу о прочтении данного сообщения
-	// 	msg.DoubleAck(ctx)
-	// }
-	// fmt.Println("Конечное состояние потока:")
-	// printStreamState(ctx, stream)
 }
 
 // Отображаем текущее состояние потока
